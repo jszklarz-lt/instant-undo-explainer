@@ -1,0 +1,359 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Instant undo and redo</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Shantell+Sans:wght@400;600&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@500;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+<style>
+/* Layout: one reading column; the diagram canvas breaks out to full width; supporting sections stack below it. */
+:root {
+  --bg: #f6f7f4; --surface: #ffffff; --fg: #1b211d; --muted: #5d6860; --line: #d8ddd6;
+  --accent: #2c7a4b; --accent-soft: #e3f1e8; --amber: #9a6410; --amber-soft: #fbf0dc;
+  --red: #a8382c; --red-soft: #f8e4e1; --chip: #eceee9; --note: #fff1a8; --dot: #d3d8d1;
+  --f-display: "IBM Plex Sans Condensed", "Arial Narrow", sans-serif;
+  --f-body: "IBM Plex Sans", system-ui, sans-serif;
+  --f-mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+  --f-hand: "Shantell Sans", "Comic Sans MS", cursive;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #121613; --surface: #1a201c; --fg: #e4e9e4; --muted: #9aa69d; --line: #2e3731;
+    --accent: #6cc28f; --accent-soft: #1d3326; --amber: #e0aa55; --amber-soft: #3a2d17;
+    --red: #ea8a7e; --red-soft: #3d201c; --chip: #252c27; --note: #4a4220; --dot: #2a322c; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #121613; --surface: #1a201c; --fg: #e4e9e4; --muted: #9aa69d; --line: #2e3731;
+  --accent: #6cc28f; --accent-soft: #1d3326; --amber: #e0aa55; --amber-soft: #3a2d17;
+  --red: #ea8a7e; --red-soft: #3d201c; --chip: #252c27; --note: #4a4220; --dot: #2a322c; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--fg); font: 15px/1.6 var(--f-body); padding-inline: 16px; padding-block: 32px 64px; }
+.wrap { max-width: 1180px; margin: 0 auto; display: grid; gap: 40px; }
+.col { max-width: 720px; }
+h1, h2, h3 { font-family: var(--f-display); text-wrap: balance; margin: 0; line-height: 1.15; }
+h1 { font-size: 2.1rem; font-weight: 600; }
+h2 { font-size: 1.35rem; font-weight: 600; margin-bottom: 12px; }
+h3 { font-size: 1.02rem; font-weight: 600; }
+p { margin: 0 0 12px; }
+code { font-family: var(--f-mono); font-size: .86em; background: var(--chip); padding: 1px 5px; border-radius: 4px; overflow-wrap: anywhere; }
+.eyebrow { font: 500 .74rem/1 var(--f-mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+.rev { color: var(--accent); }
+.lede { font-size: 1.06rem; color: var(--muted); margin-top: 12px; }
+section { display: grid; gap: 4px; }
+.legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: .82rem; color: var(--muted); margin-bottom: 14px; }
+.chip { font: 500 .68rem/1 var(--f-mono); letter-spacing: .05em; text-transform: uppercase; padding: 4px 6px; border-radius: 4px; white-space: nowrap; }
+.c-existing { background: var(--chip); color: var(--muted); }
+.c-extended { background: var(--amber-soft); color: var(--amber); }
+.c-new { background: var(--accent-soft); color: var(--accent); }
+.c-removed { background: var(--red-soft); color: var(--red); }
+
+/* diagram canvas */
+.canvas { overflow-x: auto; background-color: var(--surface); background-image: radial-gradient(var(--dot) 1.2px, transparent 1.2px); background-size: 22px 22px; border: 1px solid var(--line); border-radius: 10px; }
+.canvas svg { display: block; width: 100%; min-width: 980px; height: auto; font-family: var(--f-hand); }
+.canvas .t-title { font-size: 17px; font-weight: 600; fill: var(--fg); }
+.canvas .t-sub { font-size: 13.5px; fill: var(--muted); }
+.canvas .t-tag { font-size: 11px; font-weight: 600; letter-spacing: .06em; }
+.canvas .t-zone { font-size: 13px; fill: var(--muted); }
+.canvas .t-arrow { font-size: 13px; fill: var(--fg); paint-order: stroke; stroke: var(--surface); stroke-width: 6px; stroke-linejoin: round; }
+.canvas .t-note { font-size: 13.5px; fill: var(--fg); }
+.k-new { color: var(--accent); } .k-extended { color: var(--amber); } .k-removed { color: var(--red); }
+.k-existing, .k-actor, .k-arrow { color: var(--fg); } .k-zone { color: var(--muted); }
+.f-new { fill: var(--accent-soft); } .f-extended { fill: var(--amber-soft); } .f-removed { fill: var(--red-soft); }
+.f-existing, .f-actor { fill: var(--surface); } .f-note { fill: var(--note); }
+
+/* step-through player */
+.board-item { transition: opacity .35s ease; }
+.board-item.off { opacity: 0; }
+.board-item.dim { opacity: .6; }
+.board-item.pop { animation: pop .45s cubic-bezier(.2,.9,.3,1.3); transform-box: fill-box; transform-origin: center; }
+@keyframes pop { from { transform: scale(.82); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .board-item { transition: none; } .board-item.pop { animation: none; } }
+.player { display: grid; gap: 12px; margin-top: 12px; }
+.caption { display: flex; gap: 12px; align-items: baseline; min-height: 2.2em; font-family: var(--f-hand); font-size: 1.12rem; }
+.caption-n { font: 500 .8rem var(--f-mono); color: var(--accent); white-space: nowrap; }
+.controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.controls button { font: 500 .82rem var(--f-body); color: var(--fg); background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 6px 12px; cursor: pointer; }
+.controls button:hover { border-color: var(--accent); }
+.controls button:focus-visible, .steps button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.controls .primary { background: var(--accent); border-color: var(--accent); color: var(--surface); }
+.steps { display: flex; flex-wrap: wrap; gap: 6px; list-style: none; margin: 0; padding: 0; }
+.steps button { font: 500 .78rem var(--f-mono); width: 30px; height: 30px; border-radius: 50%; border: 1px solid var(--line); background: var(--surface); color: var(--muted); cursor: pointer; }
+.steps button.done { background: var(--accent-soft); color: var(--accent); border-color: var(--accent-soft); }
+.steps button.now { background: var(--accent); color: var(--surface); border-color: var(--accent); }
+
+/* supporting sections */
+.changes summary { cursor: pointer; font: 600 1rem var(--f-display); }
+.changes[open] summary { margin-bottom: 10px; }
+.grid2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+@media (max-width: 640px) { .grid2 { grid-template-columns: 1fr; } }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 16px; display: grid; gap: 8px; align-content: start; min-width: 0; }
+.card p { margin: 0; font-size: .9rem; }
+.verdict { font: 500 .72rem var(--f-mono); letter-spacing: .05em; text-transform: uppercase; }
+.v-no { color: var(--red); } .v-yes { color: var(--accent); } .v-maybe { color: var(--amber); }
+table { border-collapse: collapse; width: 100%; font-size: .88rem; }
+th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font: 600 .74rem var(--f-mono); letter-spacing: .05em; text-transform: uppercase; color: var(--muted); }
+.table-scroll { overflow-x: auto; }
+.code { font: .82rem/1.55 var(--f-mono); background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; overflow-x: auto; margin: 4px 0 12px; }
+.q { display: grid; grid-template-columns: 34px 1fr; gap: 10px; padding: 14px 0; border-bottom: 1px solid var(--line); }
+.q:last-child { border-bottom: 0; }
+.q-id { font: 600 .9rem var(--f-mono); color: var(--accent); }
+.q p { margin: 4px 0 0; font-size: .9rem; color: var(--muted); }
+.q .lean { color: var(--fg); }
+.callout { background: var(--accent-soft); border-radius: 10px; padding: 16px 18px; display: grid; gap: 6px; }
+.callout .callout-label { font: 600 .72rem var(--f-mono); letter-spacing: .08em; text-transform: uppercase; color: var(--accent); }
+.callout p { margin: 0; }
+.callout.warn { background: var(--amber-soft); } .callout.warn .callout-label { color: var(--amber); }
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+.stat { border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; background: var(--surface); }
+.stat b { display: block; font: 600 1.5rem var(--f-display); font-variant-numeric: tabular-nums; }
+.stat span { font-size: .8rem; color: var(--muted); }
+.foot { font-size: .82rem; color: var(--muted); border-top: 1px solid var(--line); padding-top: 16px; }
+.canvas .t-bar { font-size: 13px; font-weight: 600; fill: var(--fg); }
+.flow + .flow { margin-top: 24px; }
+.mocks { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+@media (max-width: 860px) { .mocks { grid-template-columns: 1fr; } }
+.mock { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 16px; display: grid; gap: 10px; align-content: start; min-width: 0; }
+.mock-head { display: flex; gap: 8px; align-items: center; font-size: .8rem; color: var(--muted); flex-wrap: wrap; }
+.bubble { padding: 10px 13px; border-radius: 14px; font-size: .9rem; line-height: 1.45; max-width: 92%; }
+.bubble.me { justify-self: end; background: var(--chip); border-bottom-right-radius: 4px; }
+.bubble.bot { justify-self: start; background: var(--accent-soft); border-bottom-left-radius: 4px; display: grid; gap: 10px; }
+.pill { justify-self: start; font: 600 .8rem var(--f-body); color: var(--surface); background: var(--accent); border-radius: 999px; padding: 6px 12px; }
+.mock-note { margin: 0; font-size: .8rem; color: var(--muted); font-family: var(--f-hand); }
+.decisions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+@media (max-width: 640px) { .decisions { grid-template-columns: 1fr; } }
+.dec { border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 6px; padding: 10px 12px; display: grid; gap: 2px; font-size: .88rem; background: var(--surface); }
+.dec span { color: var(--muted); }
+.dec.open { border-left-color: var(--amber); }
+</style>
+
+<div class="wrap">
+  <header class="col">
+    <div class="eyebrow"><span class="rev">Rev 1 · explainer</span><span>28 October 2026</span><span>Unified editor · PR #19181</span></div>
+    <h1>Instant undo and redo</h1>
+    <p class="lede">Make revisiting an appearance state feel immediate. Confirmed snapshots update the screen while existing server history catches up, one request at a time.</p>
+  </header>
+
+  <!-- FLOW:START: diagrams. Each <div data-flow="id"> mounts the diagram FLOWS.id with its own player. Keep one per story;
+       delete through FLOW:END when the page has no diagrams. -->
+  <section>
+    <div class="col">
+      <h2>One cached move, two clocks</h2>
+      <!-- Keep only the chips your diagrams use. -->
+      <div class="legend">
+        <span><span class="chip c-existing">existing</span> used as-is</span>
+        <span><span class="chip c-extended">extended</span> small change</span>
+        <span><span class="chip c-new">new</span> built for this</span>
+      </div>
+    </div>
+    <div class="flow" data-flow="main"></div>
+  </section>
+
+  <!-- FLOW:END -->
+
+<section class="col"><div class="callout"><span class="callout-label">The idea</span><p><b>Render a previously confirmed state immediately, then synchronize the server cursor in order.</b> This is a bounded snapshot prototype, not a general client sync engine.</p></div></section>
+<section class="col"><h2>What changes for the creator</h2><ul><li><b>Before:</b> undo/redo waits for a server transaction before showing the restored state.</li><li><b>With a warm snapshot:</b> the editor and preview change before the response arrives. Rapid cached moves can continue while requests run in order.</li><li><b>On a cache miss:</b> eligibility is decided in the history hook; the existing server path handles navigation. The diagram shows this separate fallback branch.</li><li><b>While synchronizing:</b> publish and discard stay blocked until the queue settles.</li></ul><p>No measured latency reduction is claimed here. The prototype removes the network wait from eligible visual updates; live browser validation remains pending.</p></section>
+<section><div class="col"><h2>Why this shape</h2></div><div class="grid2"><div class="card"><h3>Keep server history canonical</h3><p>Reuse existing undo/redo mutations and cursor semantics. No backend schema or persisted data model changes.</p></div><div class="card"><h3>Cache only confirmed states</h3><p>Retain up to 20 visited appearance/header states in memory per account/session. Both sides need matching preview variables and identical stickers.</p></div><div class="card"><h3>Protect the latest visible move</h3><p>A separate Apollo optimistic layer prevents an older acknowledgement from replacing the creator’s latest requested state. Final confirmation reconciles consumers.</p></div><div class="card"><h3>Fall back when uncertain</h3><p>Cold states, content history, missing preview data, and incompatible states keep server navigation. Refresh loses only the acceleration cache.</p></div></div></section>
+<section><div class="col"><h2>Failure recovery</h2><p>The fixed review finding matters because preview and appearance controls read differently argued fields, even with a shared cache. Reloading the preview alone can leave editor controls stale.</p></div><div class="flow" data-flow="recovery"></div></section>
+<section class="col"><div class="callout warn"><span class="callout-label">Pilot boundary</span><p><b>Do not expand this to concurrent editing yet.</b> Multi-tab writes or backend coalescing can change snapshot contents without changing their current identity. Broader rollout needs immutable versions or hashes and ordering ordinary edits with history operations.</p></div></section>
+<section class="col"><h2>Alternatives considered</h2><div class="table-scroll"><table><thead><tr><th>Approach</th><th>Benefit</th><th>Cost or limit</th><th>Choice</th></tr></thead><tbody><tr><td>Client sync engine</td><td>Can support local operation replay and reconciliation.</td><td>Needs a wider protocol for versioning, conflicts, and operation ordering.</td><td class="verdict v-maybe">defer</td></tr><tr><td>Compute inverse edits</td><td>Could predict an undo state without visiting it.</td><td>Must reproduce server grouping and inverse semantics.</td><td class="verdict v-maybe">defer</td></tr><tr><td>Confirmed snapshots + optimistic layer</td><td>Fast revisits while reusing server history.</td><td>Bounded coverage; cold states still wait.</td><td class="verdict v-yes">prototype</td></tr><tr><td>Existing server navigation</td><td>Preserves current history behavior.</td><td>Visible update waits for the response.</td><td class="verdict v-maybe">fallback</td></tr></tbody></table></div></section>
+<section class="col"><h2>Rollout order</h2><ol><li>Verify the deployed QA build with the feature gate off, then on for selected internal testers.</li><li>Test warm and cold navigation, rapid undo → redo, failure recovery, account switching, and publish/discard blocking. Include Safari/mobile and remote appearance controls.</li><li>After review and QA approval, deploy with <code>curate--instant_undo_redo</code> default-off, then target a small internal cohort.</li><li>To stop the pilot, disable the gate. New evaluations stop snapshot navigation and cancel queued moves; an already-sent request settles before reconciliation. Refresh when validating targeting changes.</li></ol><p>Gate setup was verified with no pass rules or enrolled testers when prepared. This page does not claim the current console configuration or deployment state.</p></section>
+<section class="col"><h2>Decisions</h2><div class="q"><span class="q-id">D1</span><div><b>Prototype confirmed snapshots: decided.</b><p>Use the existing backend history as truth; accelerate eligible revisits in browser memory.</p></div></div><div class="q"><span class="q-id">D2</span><div><b>Opt-in pilot behind a default-off gate: decided.</b><p>Require shared editor/preview caching. URL parameters cannot enable the prototype.</p></div></div><div class="q"><span class="q-id">D3</span><div><b>Read after ambiguous failure: decided.</b><p>Refresh the draft-aware editor query as well as session and preview, guarded by the selected account. Never automatically replay the failed history request.</p></div></div></section>
+<section class="col"><h2>Still open</h2><div class="q"><span class="q-id">Q1</span><div><b>Does the deployed experience feel fast enough across surfaces?</b><p>Local automated checks passed, but loaded-build QA and Safari/mobile proof are still pending.</p><p class="lean">Lean: validate a small internal cohort with induced latency before enabling anyone more broadly.</p></div></div><div class="q"><span class="q-id">Q2</span><div><b>How should snapshot identity survive coalescing and concurrent writes?</b><p>Current history identity cannot prove that a state’s contents stayed unchanged.</p><p class="lean">Lean: add a server-issued immutable version or content hash and operation ordering before broad rollout.</p></div></div></section>
+<section class="col"><h2>Left out of this prototype</h2><p>General offline sync, multi-tab reconciliation, persistent snapshots, and speculative content/sticker undo. Revisit warming during ordinary edits once a stronger snapshot-version contract exists.</p></section>
+<section class="col"><h2>Grounding</h2><p>Code-grounded at <a href="https://github.com/blstrco/frontyard/pull/19181">PR #19181</a>, commit <code>bffa11d787</code>. The local workspace check passed 10,401 unit tests and 24 integration tests; the existing appearance refresh-consumer suite also passed. This describes implementation and known limits, not production readiness.</p><ul><li><a href="https://github.com/blstrco/frontyard/blob/bffa11d7877b649a1736fb1559d33b03fb20fd71/apps/mfe-admin-shell/src/draft/snapshotHistory.ts">Snapshot cache and ordered queue</a></li><li><a href="https://github.com/blstrco/frontyard/blob/bffa11d7877b649a1736fb1559d33b03fb20fd71/apps/mfe-admin-shell/src/hooks/useUndoRedoDraftChanges.ts">Hook integration, compatibility, and recovery</a></li><li><a href="https://github.com/blstrco/frontyard/blob/bffa11d7877b649a1736fb1559d33b03fb20fd71/docs/development/instant-history-prototype.md">Test recipe, gate behavior, and limits</a></li></ul><p>Source links require repository access. Diagrams are conceptual, with no measured timing scale.</p></section>
+
+  <p class="col foot">Share this page with reviewers. Discuss a step, decision, or open question in <a href="https://github.com/blstrco/frontyard/pull/19181">PR #19181</a>.</p>
+</div>
+
+<!-- FLOW-SCRIPT:START: delete through FLOW-SCRIPT:END when the page has no flow diagram. -->
+<script src="https://cdn.jsdelivr.net/npm/roughjs@4.6.6/bundled/rough.js"></script>
+<script>
+// ============================ DATA: edit this block only ============================
+// One entry per diagram, keyed by the data-flow id of its mount point. Coordinates are in a 1310-wide viewBox.
+const FLOWS = {"main": {"height": 445, "label": "Cached undo renders immediately through an optimistic layer while an ordered queue synchronizes existing server history.", "idleCaption": "Cached navigation changes the picture first; the server still owns history.", "steps": ["A creator clicks Undo or Redo after visiting compatible appearance states.", "The hook checks the feature gate and finds a confirmed cached state.", "An optimistic cache layer immediately shows that state in editor and preview.", "The queue sends existing history mutations one at a time.", "The server confirms each move without displacing the latest visible cursor.", "The final acknowledgement refreshes consumers and removes the optimistic layer.", "An uncached or incompatible state keeps the existing server navigation path."], "nodes": {"creator": {"x": 30, "y": 72, "w": 150, "h": 100, "kind": "actor", "title": ["Creator"], "sub": ["Undo / Redo"], "step": 1}, "hook": {"x": 250, "y": 72, "w": 220, "h": 100, "kind": "extended", "title": ["History hook"], "sub": ["+ snapshot eligibility"], "step": 2}, "cache": {"x": 540, "y": 72, "w": 220, "h": 100, "kind": "new", "title": ["Optimistic layer"], "sub": ["editor + preview"], "step": 3}, "visible": {"x": 830, "y": 72, "w": 220, "h": 100, "kind": "existing", "title": ["Visible state"], "sub": ["shared Apollo cache"], "step": 3}, "queue": {"x": 250, "y": 320, "w": 220, "h": 100, "kind": "new", "title": ["Ordered queue"], "sub": ["one request at a time"], "step": 4}, "server": {"x": 540, "y": 320, "w": 220, "h": 100, "kind": "existing", "title": ["Server history"], "sub": ["canonical cursor"], "step": 4}, "consumers": {"x": 830, "y": 320, "w": 220, "h": 100, "kind": "extended", "title": ["Consumers"], "sub": ["+ final acknowledgement"], "step": 6}, "fallback": {"x": 30, "y": 320, "w": 150, "h": 100, "kind": "existing", "title": ["Server path"], "sub": ["cold / incompatible"], "step": 7}}, "arrows": [["creator", "hook", "click", 0, 2], ["hook", "cache", "cached state", 0, 3], ["cache", "visible", "render now", 0, 3], ["hook", "queue", "enqueue", 0, 4], ["queue", "server", "undo / redo", 0, 4], ["server", "queue", "confirm", 0, 5], ["server", "consumers", "final result", 0, 6], ["consumers", "visible", "reconcile", 0, 6], ["hook", "fallback", "cold state", 0, 7]], "notes": []}, "recovery": {"height": 420, "label": "After a failed response, drop speculative state, check the selected account, and read committed server truth without replaying the mutation.", "idleCaption": "A lost response may hide a committed write. Read truth; do not replay.", "steps": ["A history response fails, even though its write may have committed.", "The queue rejects pending moves and clears cached and optimistic state.", "Recovery checks that the affected account is still selected.", "For that account, refresh the session, preview, and draft-aware appearance query.", "If another account is selected, skip recovery reloads for the old account."], "nodes": {"failure": {"x": 30, "y": 72, "w": 220, "h": 100, "kind": "existing", "title": ["Response lost"], "sub": ["commit is ambiguous"], "step": 1}, "clear": {"x": 320, "y": 72, "w": 220, "h": 100, "kind": "new", "title": ["Clear speculation"], "sub": ["stop queued moves"], "step": 2}, "guard": {"x": 610, "y": 72, "w": 220, "h": 100, "kind": "extended", "title": ["Account guard"], "sub": ["same selected account?"], "step": 3}, "read": {"x": 940, "y": 72, "w": 290, "h": 100, "kind": "extended", "title": ["Read server truth"], "sub": ["session + preview + editor"], "step": 4}, "skip": {"x": 610, "y": 290, "w": 220, "h": 100, "kind": "existing", "title": ["Skip old account"], "sub": ["no recovery reload"], "step": 5}}, "arrows": [["failure", "clear", "failure", 0, 2], ["clear", "guard", "recover", 0, 3], ["guard", "read", "yes", 0, 4], ["guard", "skip", "no", 0, 5]], "notes": [{"x": 940, "y": 290, "w": 285, "lines": ["Never retry the history move.", "It may already have committed."], "step": 4}]}}
+// ========================== ENGINE: no edits needed below ===========================
+;(function () {
+  const NS = 'http://www.w3.org/2000/svg'
+  const STEP_MS = 4400
+
+  function mountFlow(host, D) {
+    host.innerHTML = `<div class="canvas"><svg viewBox="0 0 1310 ${D.height || 600}" role="img"></svg></div>
+      <div class="player"><div class="caption" aria-live="polite"><span class="caption-n">ALL STEPS</span><span class="cap-t"></span></div>
+      <div class="controls"><button class="primary" type="button" data-act="play">▶ Play</button><button type="button" data-act="prev">← Back</button>
+      <button type="button" data-act="next">Next →</button><button type="button" data-act="all">Show all</button><ol class="steps" aria-label="Jump to step"></ol></div></div>`
+    const svg = host.querySelector('svg')
+    svg.setAttribute('aria-label', D.label || '')
+    const rc = window.rough ? window.rough.svg(svg) : null
+    const el = (tag, attrs, parent) => {
+      const e = document.createElementNS(NS, tag)
+      for (const k in attrs) e.setAttribute(k, attrs[k])
+      ;(parent || svg).appendChild(e)
+      return e
+    }
+    let seed = 7
+    const opts = (extra) => Object.assign({ stroke: 'currentColor', strokeWidth: 2, roughness: 1.1, bowing: 1.3, seed: seed++ }, extra)
+    const item = (step, cls) => el('g', { class: 'board-item ' + (cls || ''), 'data-step': step })
+    const N = Object.assign({}, D.nodes)
+
+    // Timelines: lanes, a time axis (seconds, minutes or clock times), event marks, and bars placed by time.
+    if (D.axis) {
+      const ax = D.axis, gx = item(0, 'k-zone')
+      const px = ax.pxPerUnit || ax.pxPerSec, tick = ax.tick || 1, unit = ax.unit || 's'
+      const at = (t) => ax.x0 + (t - ax.from) * px
+      const tickLabel = (t) => {
+        if (!ax.clock) return `${t} ${unit}`
+        const [h, m] = ax.clock.split(':').map(Number), mins = h * 60 + m + (unit === 'h' ? t * 60 : t)
+        return `${String(Math.floor(mins / 60) % 24).padStart(2, '0')}:${String(mins % 60).padStart(2, '0')}`
+      }
+      el('line', { x1: ax.x0, y1: ax.y, x2: at(ax.to), y2: ax.y, stroke: 'currentColor', 'stroke-width': 1.2 }, gx)
+      for (let t = ax.from; t <= ax.to + 1e-9; t += tick) {
+        el('line', { x1: at(t), y1: 50, x2: at(t), y2: ax.y, stroke: 'currentColor', 'stroke-width': 0.6, 'stroke-dasharray': '3 6', opacity: 0.5 }, gx)
+        el('text', { x: at(t), y: ax.y + 20, 'text-anchor': 'middle', class: 't-zone' }, gx).textContent = tickLabel(Math.round(t * 1000) / 1000)
+      }
+      for (const l of D.lanes || []) el('text', { x: 20, y: l.y + 30, class: 't-sub', style: 'font-weight:600' }, gx).textContent = l.label
+      for (const m of D.marks || []) {
+        const g = item(m.step, 'k-' + (m.kind || 'arrow'))
+        el('line', { x1: at(m.at), y1: 40, x2: at(m.at), y2: ax.y, stroke: 'currentColor', 'stroke-width': 1.6, 'stroke-dasharray': '6 5' }, g)
+        el('text', { x: at(m.at) + 6, y: 36, class: 't-arrow' }, g).textContent = m.label
+      }
+      ;(D.bars || []).forEach((b, i) => {
+        const id = b.id || 'bar' + i
+        N[id] = { x: at(b.from), y: D.lanes[b.lane].y + 6, w: Math.max(8, (b.to - b.from) * px), h: 44, kind: b.kind, title: [b.title], sub: [], step: b.step, compact: true }
+      })
+    }
+
+    for (const z of D.zones || []) {
+      const g = item(z.step, 'k-zone')
+      if (rc) g.appendChild(rc.rectangle(z.x, z.y, z.w, z.h, opts({ strokeWidth: 1.2, strokeLineDash: [8, 8], roughness: 0.6 })))
+      else el('rect', { x: z.x, y: z.y, width: z.w, height: z.h, rx: 6, fill: 'none', stroke: 'currentColor', 'stroke-dasharray': '8 8' }, g)
+      el('text', { x: z.x + 4, y: z.y - 9, class: 't-zone' }, g).textContent = z.label
+    }
+    for (const n of D.notes || []) {
+      const g = item(n.step)
+      const h = n.h || 40 + n.lines.length * 21
+      const rot = `rotate(-1.5 ${n.x} ${n.y})`
+      el('rect', { x: n.x, y: n.y, width: n.w, height: h, class: 'f-note', transform: rot }, g)
+      n.lines.forEach((line, i) => (el('text', { x: n.x + 14, y: n.y + 30 + i * 21, class: 't-note', transform: rot }, g).textContent = line))
+    }
+
+    const center = (n) => ({ x: n.x + n.w / 2, y: n.y + n.h / 2 })
+    const edgePoint = (n, toward, pad) => {
+      const c = center(n), dx = toward.x - c.x, dy = toward.y - c.y
+      const s = Math.min((n.w / 2 + pad) / Math.abs(dx || 1e-6), (n.h / 2 + pad) / Math.abs(dy || 1e-6))
+      return { x: c.x + dx * s, y: c.y + dy * s }
+    }
+    const head = (g, tip, from) => {
+      const ang = Math.atan2(tip.y - from.y, tip.x - from.x), len = 13, spread = 0.45
+      const p1 = { x: tip.x - len * Math.cos(ang - spread), y: tip.y - len * Math.sin(ang - spread) }
+      const p2 = { x: tip.x - len * Math.cos(ang + spread), y: tip.y - len * Math.sin(ang + spread) }
+      if (rc) { g.appendChild(rc.line(p1.x, p1.y, tip.x, tip.y, opts({ roughness: 0.6 }))); g.appendChild(rc.line(p2.x, p2.y, tip.x, tip.y, opts({ roughness: 0.6 }))) }
+      else el('path', { d: `M${p1.x},${p1.y} L${tip.x},${tip.y} L${p2.x},${p2.y}`, fill: 'none', stroke: 'currentColor', 'stroke-width': 2 }, g)
+    }
+    const pairKey = (f, t) => [f, t].sort().join('|')
+    const fan = {}
+    for (const [f, t, , bend] of D.arrows) if (!bend) (fan[pairKey(f, t)] ||= []).push(null)
+    const fanSeen = {}
+    const labels = []
+    for (const [from, to, label, rawBend, step, both] of D.arrows) {
+      const a = N[from], b = N[to]
+      if (!a || !b) { console.warn('unknown node in arrow', from, to); continue }
+      let bend = rawBend || 0
+      const key = pairKey(from, to), group = fan[key]
+      if (!bend && group && group.length > 1) {
+        const i = (fanSeen[key] = (fanSeen[key] ?? -1) + 1)
+        bend = (i - (group.length - 1) / 2) * 70 * (from < to ? 1 : -1)
+      }
+      const s0 = edgePoint(a, center(b), 6), e0 = edgePoint(b, center(a), 10)
+      const len = Math.hypot(e0.x - s0.x, e0.y - s0.y) || 1
+      const nx = -(e0.y - s0.y) / len, ny = (e0.x - s0.x) / len
+      const shift = Math.max(-24, Math.min(24, bend * 0.3))
+      const s = { x: s0.x + nx * shift, y: s0.y + ny * shift }, e = { x: e0.x + nx * shift, y: e0.y + ny * shift }
+      const c = { x: (s.x + e.x) / 2 + nx * bend, y: (s.y + e.y) / 2 + ny * bend }
+      const g = item(step, 'k-arrow')
+      const d = `M${s.x},${s.y} Q${c.x},${c.y} ${e.x},${e.y}`
+      if (rc) g.appendChild(rc.path(d, opts({ roughness: 0.8, bowing: 0.6 })))
+      else el('path', { d, fill: 'none', stroke: 'currentColor', 'stroke-width': 2 }, g)
+      head(g, e, c)
+      if (both) head(g, s, c)
+      if (!label) continue
+      const lineCount = label.split('\n').length
+      const sameRow = a.y === b.y && Math.abs(bend) < 1
+      const longest = Math.max(...label.split('\n').map((l) => l.length))
+      const push = bend ? Math.sign(bend) * (Math.abs(nx) > 0.7 ? 10 + longest * 3.6 : 12) : 0
+      labels.push({
+        step, label,
+        x: 0.25 * s.x + 0.5 * c.x + 0.25 * e.x + nx * push,
+        y: sameRow ? Math.min(a.y, b.y) - 2 - 16 * (lineCount - 1) : 0.25 * s.y + 0.5 * c.y + 0.25 * e.y + ny * push
+      })
+    }
+
+    for (const n of Object.values(N)) {
+      const g = item(n.step, 'k-' + n.kind)
+      const ellipse = n.kind === 'actor'
+      if (ellipse) el('ellipse', { cx: n.x + n.w / 2, cy: n.y + n.h / 2, rx: n.w / 2, ry: n.h / 2, class: 'f-' + n.kind }, g)
+      else el('rect', { x: n.x, y: n.y, width: n.w, height: n.h, rx: 8, class: 'f-' + n.kind }, g)
+      const dash = n.kind === 'removed' ? { strokeLineDash: [7, 6] } : {}
+      if (rc) g.appendChild(ellipse ? rc.ellipse(n.x + n.w / 2, n.y + n.h / 2, n.w, n.h, opts(dash)) : rc.rectangle(n.x, n.y, n.w, n.h, opts(dash)))
+      else el('rect', { x: n.x, y: n.y, width: n.w, height: n.h, rx: 8, fill: 'none', stroke: 'currentColor', 'stroke-width': 2 }, g)
+      const lines = [...(n.title || []).map((t) => ['t-title', t, 20]), ...(n.sub || []).map((t) => ['t-sub', t, 17])]
+      let y = n.y + n.h / 2 - lines.reduce((sum, l) => sum + l[2], 0) / 2 + 14
+      for (const [cls, text, lh] of lines) {
+        el('text', { x: n.x + n.w / 2, y, 'text-anchor': 'middle', class: n.compact ? 't-bar' : cls }, g).textContent = text
+        y += lh
+      }
+      if (!n.compact && (n.kind === 'new' || n.kind === 'extended' || n.kind === 'removed')) {
+        el('text', { x: n.x + n.w - 10, y: n.y + n.h - 9, 'text-anchor': 'end', class: 't-tag', fill: 'currentColor' }, g).textContent = n.kind.toUpperCase()
+      }
+    }
+    for (const l of labels) {
+      const g = item(l.step)
+      l.label.split('\n').forEach((line, i) => (el('text', { x: l.x, y: l.y - 6 + i * 16, 'text-anchor': 'middle', class: 't-arrow' }, g).textContent = line))
+    }
+
+    const items = [...svg.querySelectorAll('.board-item')]
+    const total = D.steps.length
+    const capN = host.querySelector('.caption-n'), capT = host.querySelector('.cap-t')
+    const playBtn = host.querySelector('[data-act="play"]')
+    const dots = D.steps.map((text, i) => {
+      const li = document.createElement('li'), b = document.createElement('button')
+      b.type = 'button'; b.textContent = i + 1; b.title = text; b.setAttribute('aria-label', `Step ${i + 1}: ${text}`)
+      b.addEventListener('click', () => { stop(); show(i + 1) })
+      li.appendChild(b); host.querySelector('.steps').appendChild(li)
+      return b
+    })
+    let current = 0, timer = null
+    function show(n) {
+      current = n
+      for (const it of items) {
+        const st = Number(it.dataset.step)
+        it.classList.toggle('off', n > 0 && st > n)
+        it.classList.toggle('dim', n > 0 && st < n && st > 0)
+        it.classList.remove('pop')
+        if (n > 0 && st === n) { it.getBoundingClientRect(); it.classList.add('pop') }
+      }
+      dots.forEach((d, i) => { d.classList.toggle('now', i + 1 === n); d.classList.toggle('done', n > 0 && i + 1 < n) })
+      capN.textContent = n === 0 ? 'ALL STEPS' : `STEP ${n} / ${total}`
+      capT.textContent = n === 0 ? D.idleCaption : D.steps[n - 1]
+    }
+    function stop() { clearInterval(timer); timer = null; playBtn.textContent = '▶ Play' }
+    function play() {
+      if (current === 0 || current >= total) show(1)
+      playBtn.textContent = '❚❚ Pause'
+      timer = setInterval(() => { if (current >= total) { stop(); return } show(current + 1) }, STEP_MS)
+    }
+    host.querySelector('[data-act="play"]').addEventListener('click', () => (timer ? stop() : play()))
+    host.querySelector('[data-act="next"]').addEventListener('click', () => { stop(); show(Math.min(total, current + 1)) })
+    host.querySelector('[data-act="prev"]').addEventListener('click', () => { stop(); show(Math.max(1, current - 1)) })
+    host.querySelector('[data-act="all"]').addEventListener('click', () => { stop(); show(0) })
+    show(0)
+  }
+
+  for (const host of document.querySelectorAll('[data-flow]')) {
+    const D = FLOWS[host.dataset.flow]
+    if (D) mountFlow(host, D)
+  }
+})()
+</script>
+<!-- FLOW-SCRIPT:END -->
+
+</html>
